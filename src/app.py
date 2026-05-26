@@ -27,7 +27,7 @@ import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from src.config import settings, ZHANG_ZHAOXI_ALIASES
 from src.data_loader import discover_raw_data_by_file
@@ -411,7 +411,11 @@ class Pipeline:
         self._daily_trace_buffer.clear()
 
     def _cleanup_after_initialization_failure(self) -> None:
-        """清理本次启动后新增的 profiles/runtime 文件，恢复到启动前状态。"""
+        """清理本次启动后残留的 profiles/runtime 变更，恢复到启动前状态。"""
+        self._rollback_to_startup_state()
+
+    def _rollback_to_startup_state(self) -> None:
+        """将 profiles/runtime 恢复到 Pipeline 创建时的快照。"""
         self._restore_tree(
             settings.PROFILES_DIR,
             self._startup_profiles_snapshot,
@@ -424,49 +428,51 @@ class Pipeline:
         )
 
     @staticmethod
-    def _snapshot_tree(root: Path) -> Set[Tuple[str, bool]]:
-        """记录目录启动前的相对路径快照，元素为 (relative_path, is_dir)。"""
+    def _snapshot_tree(root: Path) -> Dict[str, Optional[bytes]]:
+        """记录目录启动前的字节级快照；目录值为 None，文件值为 bytes。"""
         if not root.exists():
-            return set()
+            return {}
 
-        snapshot: Set[Tuple[str, bool]] = set()
+        snapshot: Dict[str, Optional[bytes]] = {}
         for path in root.rglob("*"):
             try:
                 rel = path.relative_to(root).as_posix()
+                snapshot[rel] = None if path.is_dir() else path.read_bytes()
             except ValueError:
                 continue
-            snapshot.add((rel, path.is_dir()))
+            except OSError as exc:
+                logger.warning("记录运行前快照失败，已跳过: %s (%s)", path, exc)
         return snapshot
 
     @staticmethod
-    def _restore_tree(root: Path, snapshot: Set[Tuple[str, bool]], root_existed: bool = True) -> None:
-        """删除启动后新增的文件和目录，保留启动前已有内容。"""
-        if not root.exists():
-            return
-
-        snapshot_paths = {rel for rel, _ in snapshot}
-        for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+    def _restore_tree(
+        root: Path,
+        snapshot: Dict[str, Optional[bytes]],
+        root_existed: bool = True,
+    ) -> None:
+        """按快照重建目录，删除新增项并恢复已存在文件内容。"""
+        if root.exists():
             try:
-                rel = path.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            if rel in snapshot_paths:
-                continue
-            try:
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-                logger.debug("已清理初始化失败残留: %s", path)
+                shutil.rmtree(root)
+                logger.debug("已清理运行后目录: %s", root)
             except OSError as exc:
-                logger.warning("清理初始化失败残留失败: %s (%s)", path, exc)
+                logger.warning("清理运行后目录失败: %s (%s)", root, exc)
+                return
 
         if not root_existed:
+            return
+
+        root.mkdir(parents=True, exist_ok=True)
+        for rel, content in sorted(snapshot.items()):
+            path = root / rel
             try:
-                root.rmdir()
-                logger.debug("已清理初始化失败新增目录: %s", root)
-            except OSError:
-                pass
+                if content is None:
+                    path.mkdir(parents=True, exist_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
+            except OSError as exc:
+                logger.warning("恢复运行前快照失败: %s (%s)", path, exc)
 
     @staticmethod
     def _get_chat_type(msg: Dict) -> str:
@@ -595,8 +601,10 @@ def main() -> None:
     )
     try:
         pipeline.run(init_only=args.init_only)
-    except PipelineInitializationError as exc:
-        logger.critical("%s", exc)
+    except Exception as exc:
+        logger.error("流水线执行失败，开始恢复运行前状态: %s", exc)
+        pipeline._rollback_to_startup_state()
+        logger.critical("流水线执行失败，已恢复 profiles/runtime 到运行前状态")
         raise SystemExit(1) from exc
 
 

@@ -254,3 +254,41 @@ def test_initialization_failure_rolls_back_new_profiles_and_runtime(tmp_path, mo
 
     assert sorted(p.name for p in profiles_dir.iterdir()) == [".gitkeep"]
     assert sorted(p.name for p in runtime_dir.iterdir()) == [".gitkeep"]
+
+
+def test_rollback_restores_existing_file_contents(tmp_path):
+    profiles_dir = tmp_path / "profiles"
+    runtime_dir = tmp_path / "runtime"
+    char_dir = profiles_dir / "张照西"
+    char_dir.mkdir(parents=True)
+    runtime_dir.mkdir()
+    profile_path = char_dir / "profile.md"
+    log_path = runtime_dir / "dialogue_log.jsonl"
+    profile_path.write_text("original profile", encoding="utf-8")
+    log_path.write_text("original log", encoding="utf-8")
+
+    pipeline = Pipeline.__new__(Pipeline)
+    pipeline._startup_profiles_existed = True
+    pipeline._startup_runtime_existed = True
+    pipeline._startup_profiles_snapshot = Pipeline._snapshot_tree(profiles_dir)
+    pipeline._startup_runtime_snapshot = Pipeline._snapshot_tree(runtime_dir)
+
+    profile_path.write_text("changed profile", encoding="utf-8")
+    log_path.write_text("changed log", encoding="utf-8")
+    (runtime_dir / "new_report.md").write_text("new", encoding="utf-8")
+
+    import src.app as app_module
+
+    original_profiles_dir = app_module.settings.PROFILES_DIR
+    original_runtime_dir = app_module.settings.RUNTIME_DIR
+    app_module.settings.PROFILES_DIR = profiles_dir
+    app_module.settings.RUNTIME_DIR = runtime_dir
+    try:
+        pipeline._rollback_to_startup_state()
+    finally:
+        app_module.settings.PROFILES_DIR = original_profiles_dir
+        app_module.settings.RUNTIME_DIR = original_runtime_dir
+
+    assert profile_path.read_text(encoding="utf-8") == "original profile"
+    assert log_path.read_text(encoding="utf-8") == "original log"
+    assert not (runtime_dir / "new_report.md").exists()

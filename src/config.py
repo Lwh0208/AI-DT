@@ -23,8 +23,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 默认配置值
 # ---------------------------------------------------------------------------
 _DEFAULTS: dict[str, str] = {
-    "LLM_API_URL": "http://10.127.23.252:43379/v1/chat/completions",
-    "LLM_MODEL": "qwen3-coder",
+    "LLM_API_URL": "http://10.127.23.252:44937/v1/chat/completions",
+    "LLM_MODEL": "qwen36-35b-a3b",
     "LLM_TIMEOUT_SECONDS": "120",
     "LLM_STRICT_OPENAI_COMPAT": "true",
     "DEFAULT_YEAR": "2026",

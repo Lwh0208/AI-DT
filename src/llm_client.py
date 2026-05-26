@@ -2,9 +2,8 @@
 高可用内网通用 LLM 客户端。
 
 基于 requests 实现，支持：
-- 硬编码 routing-strategy 头
-- 标准请求体格式（model, temperature, max_tokens, messages）
-- 可选扩展请求体格式（top_p, top_k, stream, chat_template_kwargs）
+- 标准请求体格式（model, messages）
+- 可选扩展请求体格式（temperature, max_tokens, top_p, top_k, stream, chat_template_kwargs）
 - 指数退避重试装饰器（最多 3 次）
 - 网络抖动 / HTTP 5xx 自动重试
 - 所有日志中严禁泄露明文 Token
@@ -112,7 +111,6 @@ class LlmClient:
         self.timeout = timeout or settings.LLM_TIMEOUT_SECONDS
 
         self._headers: Dict[str, str] = {
-            "routing-strategy": "least-request",
             "Content-Type": "application/json",
         }
         if auth_token or settings.LLM_AUTH_TOKEN:
@@ -128,7 +126,7 @@ class LlmClient:
         temperature: float = 0.7,
         top_p: float = 0.8,
         top_k: int = 20,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         enable_thinking: bool = False,
     ) -> str:
         """
@@ -139,7 +137,7 @@ class LlmClient:
             temperature: 采样温度
             top_p: 核采样概率
             top_k: Top-K 采样
-            max_tokens: 最大生成 token 数
+            max_tokens: 最大生成 token 数；为 None 时严格兼容模式下不发送该字段
             enable_thinking: 是否启用思考模式
 
         Returns:
@@ -150,11 +148,12 @@ class LlmClient:
         """
         payload: Dict[str, Any] = {
             "model": self.model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
             "messages": messages,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         if not settings.LLM_STRICT_OPENAI_COMPAT:
+            payload["temperature"] = temperature
             payload["stream"] = False
             payload["top_p"] = top_p
             payload["top_k"] = top_k
