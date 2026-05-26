@@ -14,7 +14,6 @@ from src.session_store import SessionStore
 class FakeFeedbackEngine:
     def __init__(self) -> None:
         self.generated: list[tuple[str, str, str]] = []
-        self.reflections: list[tuple[str, str, str]] = []
 
     def generate_simulated_reply(
         self,
@@ -27,23 +26,42 @@ class FakeFeedbackEngine:
         self.generated.append((current_sender, new_message, chat_type))
         return f"模拟回复{len(self.generated)}"
 
-    def reflect_and_learn(
-        self,
-        new_message: str,
-        assistant_reply: str,
-        real_reply: str,
-        current_time: datetime,
-    ) -> str:
-        self.reflections.append((new_message, assistant_reply, real_reply))
-        return "反思经验"
+
+class FakeDreamLlm:
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    def chat(self, messages: list[dict], max_tokens: int = 1024) -> str:
+        self.calls.append(messages)
+        return (
+            "---PROFILE_UPDATED_START---\n"
+            "# updated profile\n"
+            "---PROFILE_UPDATED_END---\n"
+            "---MEMORY_UPDATED_START---\n"
+            "# updated memory\n"
+            "---MEMORY_UPDATED_END---"
+        )
+
+
+class FakeProfileManager:
+    def __init__(self) -> None:
+        self.updated: list[str] = []
+
+    def get_profile(self, character_name: str) -> str:
+        return f"# {character_name} profile"
+
+    def get_memory(self, character_name: str) -> str:
+        return f"# {character_name} memory"
+
+    def dream_update(self, character_name: str, raw_output: str, update_time: datetime) -> bool:
+        self.updated.append(character_name)
+        return True
 
 
 def _make_pipeline(tmp_path) -> Pipeline:
     pipeline = Pipeline.__new__(Pipeline)
     pipeline.ss = SessionStore(log_path=tmp_path / "dialogue_log.jsonl", window_size=20)
     pipeline.fb = FakeFeedbackEngine()
-    pipeline._pending_predictions = []
-    pipeline._pending_real_replies = []
     pipeline._daily_trace_buffer = []
     return pipeline
 
@@ -107,7 +125,7 @@ def test_group_chat_with_target_mention_triggers_prediction(tmp_path):
     assert pipeline.fb.generated == [("李文浩", "西哥这个问题帮忙看一下", "群聊")]
 
 
-def test_consecutive_predictions_reflect_against_consecutive_real_replies(tmp_path):
+def test_consecutive_messages_are_tracked_for_dream_without_reflection(tmp_path):
     pipeline = _make_pipeline(tmp_path)
 
     pipeline._handle_incoming_message(
@@ -132,24 +150,57 @@ def test_consecutive_predictions_reflect_against_consecutive_real_replies(tmp_pa
         ts=datetime(2026, 4, 1, 9, 3, 0),
     )
 
-    assert pipeline.fb.reflections == []
+    trace_types = [trace["type"] for trace in pipeline._daily_trace_buffer]
+    assert trace_types == [
+        "incoming_message",
+        "simulated_reply",
+        "incoming_message",
+        "simulated_reply",
+        "real_reply",
+        "real_reply",
+    ]
+    assert Pipeline._get_dream_target_characters(pipeline._daily_trace_buffer) == [
+        "张照西",
+        "李文浩",
+    ]
 
-    pipeline._handle_incoming_message(
-        _make_msg("单聊", "下一轮问题", ts=datetime(2026, 4, 1, 9, 4, 0)),
-        sender="李文浩",
-        content="下一轮问题",
-        ts=datetime(2026, 4, 1, 9, 4, 0),
-    )
 
-    assert len(pipeline.fb.reflections) == 1
-    new_messages, simulated_replies, real_replies = pipeline.fb.reflections[0]
-    assert "第一个问题" in new_messages
-    assert "第二个补充" in new_messages
-    assert "模拟回复1" in simulated_replies
-    assert "模拟回复2" in simulated_replies
-    assert "真实回复一" in real_replies
-    assert "真实回复二" in real_replies
-    assert len(pipeline._pending_predictions) == 1
+def test_dream_updates_all_characters_in_daily_traces(tmp_path):
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.llm = FakeDreamLlm()
+    pipeline.pm = FakeProfileManager()
+    pipeline._daily_trace_buffer = [
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 0, 0),
+            "type": "incoming_message",
+            "sender": "李文浩",
+            "content": "帮忙看下",
+            "conversation_id": "单聊/liwenhao.txt",
+        },
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 0, 1),
+            "type": "simulated_reply",
+            "sender": "张照西",
+            "content": "我看看",
+            "conversation_id": "单聊/liwenhao.txt",
+        },
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 1, 0),
+            "type": "incoming_message",
+            "sender": "赵宇",
+            "content": "我补充一下",
+            "conversation_id": "单聊/zhaoyu.txt",
+        },
+    ]
+
+    pipeline._trigger_dream_mode(datetime(2026, 4, 1))
+
+    assert pipeline.pm.updated == ["张照西", "李文浩", "赵宇"]
+    assert len(pipeline.llm.calls) == 3
+    user_prompts = [call[1]["content"] for call in pipeline.llm.calls]
+    assert any('角色"张照西"' in prompt for prompt in user_prompts)
+    assert any('角色"李文浩"' in prompt for prompt in user_prompts)
+    assert any('角色"赵宇"' in prompt for prompt in user_prompts)
 
 
 def test_initialization_failure_rolls_back_new_profiles_and_runtime(tmp_path, monkeypatch):

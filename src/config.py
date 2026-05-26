@@ -150,7 +150,6 @@ class Settings:
         self.PROFILES_DIR: Path = _PROJECT_ROOT / "profiles"
         self.RUNTIME_DIR: Path = _PROJECT_ROOT / "runtime"
         self.DIALOGUE_LOG_PATH: Path = self.RUNTIME_DIR / "dialogue_log.jsonl"
-        self.EXPERIENCE_PATH: Path = self.RUNTIME_DIR / "经验.md"
 
         self._validate()
 

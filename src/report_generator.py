@@ -1,14 +1,13 @@
 """
 运行报告生成器。
 
-在流水线结束后，从 runtime/ 中的 dialogue_log.jsonl 和 经验.md
+在流水线结束后，从 runtime/ 中的 dialogue_log.jsonl
 提取数据，生成一份按时间线排列的人类可读汇总报告。
 
 报告内容：
 1. 运行概览：数据量、角色统计、时间跨度
-2. 逐条消息处理明细：触发原因、模拟回复、真实回复、偏差分析
+2. 逐条消息处理明细：触发消息、模拟回复、真实回复
 3. Dream 模式更新摘要
-4. 经验沉淀汇总
 """
 
 from __future__ import annotations
@@ -61,7 +60,6 @@ class ReportGenerator:
         sections.append(self._build_header(run_id))
         sections.append(self._build_overview())
         sections.append(self._build_message_timeline())
-        sections.append(self._build_experience_summary())
         sections.append(self._build_dream_summary())
 
         report_content = "\n\n".join(sections)
@@ -261,43 +259,6 @@ class ReportGenerator:
             # 如果是模拟回复，标注触发消息
             if role == "simulated" and trigger:
                 lines.append(f"- **触发消息**: {trigger[:100]}")
-
-        return "\n".join(lines)
-
-    def _build_experience_summary(self) -> str:
-        """经验沉淀汇总。"""
-        exp_path = settings.EXPERIENCE_PATH
-        if not exp_path.is_file():
-            return "## 经验沉淀汇总\n\n*尚无经验记录。*"
-
-        with open(exp_path, "r", encoding="utf-8") as fh:
-            content = fh.read().strip()
-
-        if not content:
-            return "## 经验沉淀汇总\n\n*尚无经验记录。*"
-
-        # 统计反思条目数
-        reflection_count = content.count("* [反思时间：")
-        no_variance_count = content.count("NO_VARIANCE")
-
-        lines = [
-            "## 经验沉淀汇总",
-            "",
-            f"- **反思条目数**: {reflection_count}",
-            f"- **完全匹配次数**: {no_variance_count}",
-            "",
-            "### 最新经验规则",
-            "",
-        ]
-
-        # 取最后 5 条反思
-        parts = content.split("* [反思时间：")
-        recent_parts = parts[-5:] if len(parts) > 1 else [content]
-        for part in recent_parts:
-            if part.strip():
-                rule_text = "* [反思时间：" + part.strip() if not part.startswith("反思") else part.strip()
-                lines.append(rule_text[:200])
-                lines.append("")
 
         return "\n".join(lines)
 

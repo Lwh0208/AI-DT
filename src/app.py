@@ -10,7 +10,7 @@
 
 阶段二：模拟运行（在线）
     数据来源：data/test/ 目录下的 .txt 文件
-    流程：按聊天窗口逐文件遍历测试消息 → 模拟回复 → 即时反思
+    流程：按聊天窗口逐文件遍历测试消息 → 模拟回复 → Dream 模式更新画像
     特点：每个聊天窗口独立维护最近上下文；日期变更时触发 Dream 模式状态演进
 
 使用方式：
@@ -76,8 +76,6 @@ class Pipeline:
 
         # 运行时状态追踪
         self._last_date: Optional[datetime] = None
-        self._pending_predictions: List[Dict[str, Any]] = []
-        self._pending_real_replies: List[Dict[str, Any]] = []
         self._daily_trace_buffer: List[Dict[str, Any]] = []
         self._known_characters: Set[str] = set()
 
@@ -220,7 +218,6 @@ class Pipeline:
 
             # 每个窗口独立完成最后一天的 Dream 同步，避免跨窗口轨迹混杂。
             if self._daily_trace_buffer:
-                self._flush_pending_reflection()
                 last_date = self._last_date or self._daily_trace_buffer[-1].get("timestamp")
                 if last_date:
                     self._trigger_dream_mode(last_date)
@@ -248,7 +245,6 @@ class Pipeline:
                     self._last_date.strftime("%Y-%m-%d"),
                     current_date.strftime("%Y-%m-%d"),
                 )
-                self._flush_pending_reflection()
                 self._trigger_dream_mode(self._last_date)
                 self._daily_trace_buffer.clear()
 
@@ -268,8 +264,6 @@ class Pipeline:
         ts: datetime,
     ) -> None:
         """处理非张照西发送的新消息：按窗口类型决定是否生成模拟回复。"""
-        self._flush_pending_reflection()
-
         chat_type = self._get_chat_type(msg)
         is_group = chat_type == "群聊"
 
@@ -314,64 +308,26 @@ class Pipeline:
             }
             self.ss.append(simulated_record)
 
-            self._pending_predictions.append({
-                "timestamp": ts,
-                "sender": sender,
-                "message": content,
-                "assistant_reply": simulated,
-                "conversation_id": msg.get("conversation_id", msg.get("source_file", "")),
-            })
-
             self._daily_trace_buffer.append({
                 "timestamp": ts,
                 "type": "simulated_reply",
+                "sender": TARGET_CHARACTER,
                 "content": simulated,
                 "conversation_id": msg.get("conversation_id", msg.get("source_file", "")),
             })
 
     def _handle_real_reply(self, msg: Dict, ts: datetime) -> None:
-        """处理张照西的真实回复：记录并触发即时反思。"""
+        """处理张照西的真实回复并记录到 Dream 审计踪迹。"""
         content = msg["content"]
         self._record_message(msg, role="real")
 
         self._daily_trace_buffer.append({
             "timestamp": ts,
             "type": "real_reply",
+            "sender": TARGET_CHARACTER,
             "content": content,
             "conversation_id": msg.get("conversation_id", msg.get("source_file", "")),
         })
-
-        if self._pending_predictions:
-            self._pending_real_replies.append({
-                "timestamp": ts,
-                "sender": TARGET_CHARACTER,
-                "content": content,
-                "conversation_id": msg.get("conversation_id", msg.get("source_file", "")),
-            })
-
-    def _flush_pending_reflection(self) -> None:
-        """将一段 pending 预测与随后连续真实回复整体反思。"""
-        if not self._pending_predictions or not self._pending_real_replies:
-            return
-
-        reflection_time = self._pending_real_replies[-1]["timestamp"]
-        conversation_id = self._pending_real_replies[-1].get("conversation_id", "")
-        reflection = self.fb.reflect_and_learn(
-            new_message=self._format_pending_messages(self._pending_predictions),
-            assistant_reply=self._format_pending_predictions(self._pending_predictions),
-            real_reply=self._format_real_replies(self._pending_real_replies),
-            current_time=reflection_time,
-        )
-        if reflection:
-            self._daily_trace_buffer.append({
-                "timestamp": reflection_time,
-                "type": "reflection",
-                "content": reflection,
-                "conversation_id": conversation_id,
-            })
-
-        self._pending_predictions.clear()
-        self._pending_real_replies.clear()
 
     # ==================================================================
     # Dream 模式
@@ -386,39 +342,49 @@ class Pipeline:
             logger.info("本日无对话踪迹，跳过 Dream 模式")
             return
 
-        current_profile = self.pm.get_profile(TARGET_CHARACTER)
-        current_memory = self.pm.get_memory(TARGET_CHARACTER)
-
         traces_text = self._format_daily_traces(self._daily_trace_buffer)
         current_time_str = target_date.strftime("%Y-%m-%d 23:59:59")
+        target_characters = self._get_dream_target_characters(self._daily_trace_buffer)
 
-        system_msg = SYSTEM_PROMPT_DREAM_SYNC.format(current_time=current_time_str)
-        user_msg = USER_PROMPT_DREAM_SYNC.format(
-            current_time=current_time_str,
-            current_profile=current_profile,
-            current_memory=current_memory,
-            daily_conversation_traces=traces_text,
-        )
+        for character_name in target_characters:
+            current_profile = self.pm.get_profile(character_name)
+            current_memory = self.pm.get_memory(character_name)
 
-        try:
-            raw_output = self.llm.chat(
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=settings.DREAM_MAX_TOKENS,
+            system_msg = SYSTEM_PROMPT_DREAM_SYNC.format(
+                current_time=current_time_str,
+                target_character=character_name,
             )
-            success = self.pm.dream_update(
-                character_name=TARGET_CHARACTER,
-                raw_output=raw_output,
-                update_time=target_date,
+            user_msg = USER_PROMPT_DREAM_SYNC.format(
+                current_time=current_time_str,
+                target_character=character_name,
+                current_profile=current_profile,
+                current_memory=current_memory,
+                daily_conversation_traces=traces_text,
             )
-            if success:
-                logger.info("Dream 模式更新成功 (%s)", date_str)
-            else:
-                logger.warning("Dream 模式更新失败，输出已安全兜底 (%s)", date_str)
-        except Exception as exc:
-            logger.error("Dream 模式 LLM 调用失败: %s", exc)
+
+            try:
+                raw_output = self.llm.chat(
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    max_tokens=settings.DREAM_MAX_TOKENS,
+                )
+                success = self.pm.dream_update(
+                    character_name=character_name,
+                    raw_output=raw_output,
+                    update_time=target_date,
+                )
+                if success:
+                    logger.info("角色 [%s] Dream 模式更新成功 (%s)", character_name, date_str)
+                else:
+                    logger.warning(
+                        "角色 [%s] Dream 模式更新失败，输出已安全兜底 (%s)",
+                        character_name,
+                        date_str,
+                    )
+            except Exception as exc:
+                logger.error("角色 [%s] Dream 模式 LLM 调用失败: %s", character_name, exc)
 
         logger.info("===== Dream 模式结束 (%s) =====", date_str)
 
@@ -439,46 +405,9 @@ class Pipeline:
         }
         self.ss.append(record)
 
-    @staticmethod
-    def _format_pending_messages(predictions: List[Dict[str, Any]]) -> str:
-        """格式化一组触发预测的连续新消息。"""
-        lines: list[str] = []
-        for idx, item in enumerate(predictions, start=1):
-            ts = item.get("timestamp", "")
-            if isinstance(ts, datetime):
-                ts = ts.strftime("%Y-%m-%d %H:%M:%S")
-            sender = item.get("sender", "未知")
-            message = item.get("message", "")
-            lines.append(f"{idx}. [{ts}] {sender}: {message}")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_pending_predictions(predictions: List[Dict[str, Any]]) -> str:
-        """格式化每条新消息对应的模拟回复。"""
-        lines: list[str] = []
-        for idx, item in enumerate(predictions, start=1):
-            message = item.get("message", "")
-            reply = item.get("assistant_reply", "")
-            lines.append(f"{idx}. 触发消息：{message}\n   模拟回复：{reply}")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_real_replies(real_replies: List[Dict[str, Any]]) -> str:
-        """格式化随后连续出现的张照西真实回复。"""
-        lines: list[str] = []
-        for idx, item in enumerate(real_replies, start=1):
-            ts = item.get("timestamp", "")
-            if isinstance(ts, datetime):
-                ts = ts.strftime("%Y-%m-%d %H:%M:%S")
-            content = item.get("content", "")
-            lines.append(f"{idx}. [{ts}] {TARGET_CHARACTER}: {content}")
-        return "\n".join(lines)
-
     def _reset_window_state(self) -> None:
         """重置单个聊天窗口内的运行状态。"""
         self._last_date = None
-        self._pending_predictions = []
-        self._pending_real_replies = []
         self._daily_trace_buffer.clear()
 
     def _cleanup_after_initialization_failure(self) -> None:
@@ -611,6 +540,16 @@ class Pipeline:
             window = f"[{conversation_id}] " if conversation_id else ""
             lines.append(f"{window}[{ts_str}] [{trace_type}] {sender}: {content}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _get_dream_target_characters(traces: List[Dict[str, Any]]) -> List[str]:
+        """从当日会话踪迹中识别需要更新画像/记忆的角色。"""
+        characters: Set[str] = set()
+        for trace in traces:
+            sender = str(trace.get("sender", "")).strip()
+            if sender:
+                characters.add(sender)
+        return sorted(characters)
 
 
 def main() -> None:
