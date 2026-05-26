@@ -148,4 +148,3 @@ PYTHONPATH=. pytest tests/ -v
 - 日期变更时强制触发 Dream 模式
 - 更新时间为对话时间而非真实时间
 
-> AI生成
