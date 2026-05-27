@@ -178,7 +178,17 @@ class ProfileManager:
 
     def get_profile(self, character_name: str) -> str:
         """读取角色画像全文。若文件不存在，返回空字符串。"""
-        path = self.profiles_dir / character_name / "profile.md"
+        path = self._latest_version_file(character_name, "profile.md")
+        if path is None:
+            return ""
+        if not path.is_file():
+            return ""
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def get_profile_as_of(self, character_name: str, as_of: datetime) -> str:
+        """读取指定时间点可用的最近角色画像。若文件不存在，返回空字符串。"""
+        path = self._version_file_as_of(character_name, "profile.md", as_of)
         if not path.is_file():
             return ""
         with open(path, "r", encoding="utf-8") as fh:
@@ -186,7 +196,17 @@ class ProfileManager:
 
     def get_memory(self, character_name: str) -> str:
         """读取角色记忆全文。若文件不存在，返回空字符串。"""
-        path = self.profiles_dir / character_name / "memory.md"
+        path = self._latest_version_file(character_name, "memory.md")
+        if path is None:
+            return ""
+        if not path.is_file():
+            return ""
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def get_memory_as_of(self, character_name: str, as_of: datetime) -> str:
+        """读取指定时间点可用的最近角色记忆。若文件不存在，返回空字符串。"""
+        path = self._version_file_as_of(character_name, "memory.md", as_of)
         if not path.is_file():
             return ""
         with open(path, "r", encoding="utf-8") as fh:
@@ -194,7 +214,8 @@ class ProfileManager:
 
     def profile_exists(self, character_name: str) -> bool:
         """判断角色的画像文件是否存在。"""
-        return (self.profiles_dir / character_name / "profile.md").is_file()
+        path = self._latest_version_file(character_name, "profile.md")
+        return path is not None and path.is_file()
 
     # ------------------------------------------------------------------
     # 初始化构建
@@ -229,7 +250,12 @@ class ProfileManager:
         ], max_tokens=settings.PROFILE_INIT_MAX_TOKENS)
 
         parsed = parse_initial_build_output(raw_output)
-        self._write_profile_and_memory(target_character, parsed.profile, parsed.memory)
+        self._write_profile_and_memory(
+            target_character,
+            parsed.profile,
+            parsed.memory,
+            version_time=settings.PROFILE_INIT_CUTOFF,
+        )
         logger.info("角色 [%s] 画像与记忆初始化完成", target_character)
         return parsed
 
@@ -268,13 +294,18 @@ class ProfileManager:
 
         # 强制审计追踪：在二级或三级标题变更处注入 HTML 注释
         profile_with_audit = self._inject_audit_trail(
-            parsed.profile, self.get_profile(character_name), update_time
+            parsed.profile, self.get_profile_as_of(character_name, update_time), update_time
         )
         memory_with_audit = self._inject_audit_trail(
-            parsed.memory, self.get_memory(character_name), update_time
+            parsed.memory, self.get_memory_as_of(character_name, update_time), update_time
         )
 
-        self._write_profile_and_memory(character_name, profile_with_audit, memory_with_audit)
+        self._write_profile_and_memory(
+            character_name,
+            profile_with_audit,
+            memory_with_audit,
+            version_time=update_time,
+        )
         logger.info("角色 [%s] Dream 增量更新成功 (时间: %s)", character_name, update_time)
         return True
 
@@ -283,14 +314,20 @@ class ProfileManager:
     # ------------------------------------------------------------------
 
     def _write_profile_and_memory(
-        self, character_name: str, profile_text: str, memory_text: str
+        self,
+        character_name: str,
+        profile_text: str,
+        memory_text: str,
+        version_time: Optional[datetime] = None,
     ) -> None:
-        """将画像和记忆文本写入对应文件（目录并发创建安全）。"""
+        """将画像和记忆文本写入对应日期版本目录（目录并发创建安全）。"""
+        version_dir = self._version_dir(character_name, version_time or datetime.now())
         char_dir = self.profiles_dir / character_name
         char_dir.mkdir(parents=True, exist_ok=True)
+        version_dir.mkdir(parents=True, exist_ok=True)
 
-        profile_path = char_dir / "profile.md"
-        memory_path = char_dir / "memory.md"
+        profile_path = version_dir / "profile.md"
+        memory_path = version_dir / "memory.md"
 
         with open(profile_path, "w", encoding="utf-8") as fh:
             fh.write(profile_text)
@@ -298,6 +335,64 @@ class ProfileManager:
             fh.write(memory_text)
 
         logger.debug("写入角色 [%s] 画像(%d字符) 和记忆(%d字符)", character_name, len(profile_text), len(memory_text))
+
+    def _version_dir(self, character_name: str, version_time: datetime) -> Path:
+        """角色在指定日期的画像版本目录。"""
+        return self.profiles_dir / character_name / version_time.strftime("%Y-%m-%d")
+
+    def _latest_version_file(self, character_name: str, file_name: str) -> Optional[Path]:
+        """读取角色最新日期版本文件。"""
+        char_dir = self.profiles_dir / character_name
+        if not char_dir.is_dir():
+            return None
+
+        candidates: list[Tuple[str, Path]] = []
+        legacy_path = char_dir / file_name
+        if legacy_path.is_file():
+            candidates.append(("0000-00-00", legacy_path))
+        for child in char_dir.iterdir():
+            if child.is_dir() and self._parse_version_date(child.name) is not None:
+                version_file = child / file_name
+                if version_file.is_file():
+                    candidates.append((child.name, version_file))
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda item: item[0])[-1][1]
+
+    def _version_file_as_of(
+        self,
+        character_name: str,
+        file_name: str,
+        as_of: datetime,
+    ) -> Path:
+        """读取角色在指定时间可用的最近日期版本文件。"""
+        char_dir = self.profiles_dir / character_name
+        if not char_dir.is_dir():
+            return char_dir / file_name
+
+        as_of_date = as_of.date()
+        candidates: list[Tuple[datetime, Path]] = []
+        legacy_path = char_dir / file_name
+        if legacy_path.is_file():
+            candidates.append((datetime.min, legacy_path))
+        for child in char_dir.iterdir():
+            version_date = self._parse_version_date(child.name)
+            if version_date is None or version_date.date() > as_of_date:
+                continue
+            version_file = child / file_name
+            if version_file.is_file():
+                candidates.append((version_date, version_file))
+        if not candidates:
+            return char_dir / file_name
+        return sorted(candidates, key=lambda item: item[0])[-1][1]
+
+    @staticmethod
+    def _parse_version_date(name: str) -> Optional[datetime]:
+        """解析 YYYY-MM-DD 版本目录名。"""
+        try:
+            return datetime.strptime(name, "%Y-%m-%d")
+        except ValueError:
+            return None
 
     def _inject_audit_trail(
         self,

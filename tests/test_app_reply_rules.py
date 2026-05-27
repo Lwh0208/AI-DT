@@ -22,6 +22,7 @@ class FakeFeedbackEngine:
         chat_type: str,
         is_group: bool = False,
         conversation_id: Optional[str] = None,
+        current_time: Optional[datetime] = None,
     ) -> str:
         self.generated.append((current_sender, new_message, chat_type))
         return f"模拟回复{len(self.generated)}"
@@ -53,6 +54,12 @@ class FakeProfileManager:
     def get_memory(self, character_name: str) -> str:
         return f"# {character_name} memory"
 
+    def get_profile_as_of(self, character_name: str, as_of: datetime) -> str:
+        return f"# {character_name} profile"
+
+    def get_memory_as_of(self, character_name: str, as_of: datetime) -> str:
+        return f"# {character_name} memory"
+
     def dream_update(self, character_name: str, raw_output: str, update_time: datetime) -> bool:
         self.updated.append(character_name)
         return True
@@ -63,6 +70,7 @@ def _make_pipeline(tmp_path) -> Pipeline:
     pipeline.ss = SessionStore(log_path=tmp_path / "dialogue_log.jsonl", window_size=20)
     pipeline.fb = FakeFeedbackEngine()
     pipeline._daily_trace_buffer = []
+    pipeline._known_characters = set()
     return pipeline
 
 
@@ -159,7 +167,7 @@ def test_consecutive_messages_are_tracked_for_dream_without_reflection(tmp_path)
         "real_reply",
         "real_reply",
     ]
-    assert Pipeline._get_dream_target_characters(pipeline._daily_trace_buffer) == [
+    assert pipeline._get_dream_target_characters(pipeline._daily_trace_buffer) == [
         "张照西",
         "李文浩",
     ]
@@ -203,6 +211,120 @@ def test_dream_updates_all_characters_in_daily_traces(tmp_path):
     assert any('角色"赵宇"' in prompt for prompt in user_prompts)
 
 
+def test_dream_uses_only_character_related_windows(tmp_path):
+    pipeline = _make_pipeline(tmp_path)
+    pipeline.llm = FakeDreamLlm()
+    pipeline.pm = FakeProfileManager()
+    pipeline._daily_trace_buffer = [
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 0, 0),
+            "type": "incoming_message",
+            "sender": "李文浩",
+            "content": "李窗口消息",
+            "conversation_id": "单聊/liwenhao.txt",
+        },
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 0, 1),
+            "type": "simulated_reply",
+            "sender": "张照西",
+            "content": "张在李窗口回复",
+            "conversation_id": "单聊/liwenhao.txt",
+        },
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 1, 0),
+            "type": "incoming_message",
+            "sender": "赵宇",
+            "content": "赵窗口消息",
+            "conversation_id": "单聊/zhaoyu.txt",
+        },
+    ]
+
+    pipeline._trigger_dream_mode(datetime(2026, 4, 1))
+
+    prompts_by_character = {
+        character: call[1]["content"]
+        for character, call in zip(pipeline.pm.updated, pipeline.llm.calls)
+    }
+    assert "赵窗口消息" not in prompts_by_character["张照西"]
+    assert "李窗口消息" not in prompts_by_character["赵宇"]
+    assert "赵窗口消息" in prompts_by_character["赵宇"]
+
+
+def test_all_mention_makes_window_relevant_to_all_known_characters(tmp_path, monkeypatch):
+    import src.app as app_module
+
+    profiles_dir = tmp_path / "profiles"
+    (profiles_dir / "张照西").mkdir(parents=True)
+    (profiles_dir / "李文浩").mkdir()
+    (profiles_dir / "赵宇").mkdir()
+    monkeypatch.setattr(app_module.settings, "PROFILES_DIR", profiles_dir)
+
+    pipeline = _make_pipeline(tmp_path)
+    pipeline._known_characters = {"张照西", "李文浩", "赵宇"}
+    traces = [
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 0, 0),
+            "type": "incoming_message",
+            "sender": "李文浩",
+            "content": "@所有人 这个消息大家都看一下",
+            "conversation_id": "群聊/project.txt",
+        },
+        {
+            "timestamp": datetime(2026, 4, 1, 9, 1, 0),
+            "type": "incoming_message",
+            "sender": "王磊",
+            "content": "另一个窗口",
+            "conversation_id": "群聊/other.txt",
+        },
+    ]
+
+    assert pipeline._get_dream_target_characters(traces) == [
+        "张照西",
+        "李文浩",
+        "王磊",
+        "赵宇",
+    ]
+    zhao_traces = pipeline._filter_traces_for_character(traces, "赵宇")
+    assert [trace["conversation_id"] for trace in zhao_traces] == ["群聊/project.txt"]
+
+
+def test_initial_profiles_ignore_history_on_or_after_cutoff(tmp_path):
+    pipeline = _make_pipeline(tmp_path)
+    captured: dict[str, str] = {}
+    pipeline.pm = type(
+        "FakeProfileManager",
+        (),
+        {
+            "profile_exists": lambda self, name: False,
+            "build_initial_profiles": lambda self, name, text: captured.setdefault(name, text),
+        },
+    )()
+
+    conversations = {
+        "before.txt": [
+            {
+                "timestamp": datetime(2026, 2, 28, 23, 59, 59),
+                "sender": "张照西",
+                "content": "保留",
+            }
+        ],
+        "after.txt": [
+            {
+                "timestamp": datetime(2026, 3, 1, 0, 0, 0),
+                "sender": "赵宇",
+                "content": "丢弃",
+            }
+        ],
+    }
+
+    pipeline._initialize_profiles(conversations)
+
+    assert "张照西" in captured
+    assert "保留" in captured["张照西"]
+    assert "丢弃" not in captured["张照西"]
+    assert "赵宇" not in captured
+
+
 def test_initialization_failure_rolls_back_new_profiles_and_runtime(tmp_path, monkeypatch):
     import src.app as app_module
 
@@ -238,7 +360,7 @@ def test_initialization_failure_rolls_back_new_profiles_and_runtime(tmp_path, mo
     conversations = {
         "单聊/liwenhao.txt": [
             {
-                "timestamp": datetime(2026, 4, 1, 9, 0, 0),
+                "timestamp": datetime(2026, 2, 1, 9, 0, 0),
                 "sender": "李文浩",
                 "content": "测试消息",
             }

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,7 @@ _DEFAULTS: dict[str, str] = {
     "CONTEXT_WINDOW_SIZE": "20",
     "PROFILE_INIT_MAX_INPUT_CHARS": "60000",
     "PROFILE_INIT_MAX_TOKENS": "16384",
+    "PROFILE_INIT_CUTOFF": "2026-03-01",
     "DREAM_MAX_TOKENS": "16384",
 }
 
@@ -134,6 +136,13 @@ class Settings:
                 "PROFILE_INIT_MAX_TOKENS",
                 _DEFAULTS["PROFILE_INIT_MAX_TOKENS"],
             )
+        )
+        self.PROFILE_INIT_CUTOFF: datetime = datetime.strptime(
+            os.environ.get(
+                "PROFILE_INIT_CUTOFF",
+                _DEFAULTS["PROFILE_INIT_CUTOFF"],
+            ),
+            "%Y-%m-%d",
         )
         self.DREAM_MAX_TOKENS: int = int(
             os.environ.get(

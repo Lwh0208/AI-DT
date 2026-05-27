@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 # 目标角色
 TARGET_CHARACTER = "张照西"
+ALL_MENTION_MARKERS = ("@所有人", "＠所有人", "@全体成员", "＠全体成员")
 
 
 class PipelineInitializationError(RuntimeError):
@@ -161,9 +162,15 @@ class Pipeline:
 
     def _initialize_profiles(self, conversations: Dict[str, List[Dict]]) -> None:
         """
-        分析历史聊天记录，为张照西和所有已识别的其他角色构建画像。
+        分析 2026-03-01 之前的历史聊天记录，为张照西和所有已识别的其他角色构建画像。
         已有画像的角色自动跳过。
         """
+        cutoff = settings.PROFILE_INIT_CUTOFF
+        conversations = self._filter_conversations_before(conversations, cutoff)
+        if not conversations:
+            logger.warning("历史数据中无 %s 之前的聊天记录，跳过画像初始化", cutoff.date())
+            return
+
         all_senders: Set[str] = set()
         for messages in conversations.values():
             for msg in messages:
@@ -203,25 +210,24 @@ class Pipeline:
     # ==================================================================
 
     def _process_conversations(self, conversations: Dict[str, List[Dict]]) -> None:
-        """按聊天窗口逐个处理测试数据。"""
+        """将所有测试窗口合并为全局时间线处理，窗口上下文仍按 conversation_id 隔离。"""
+        all_messages: list[Dict[str, Any]] = []
         for conversation_id, messages in conversations.items():
-            if not messages:
-                continue
+            logger.info("纳入聊天窗口 [%s]，共 %d 条消息", conversation_id, len(messages))
+            all_messages.extend(messages)
 
-            logger.info(
-                "开始处理聊天窗口 [%s]，共 %d 条消息",
-                conversation_id,
-                len(messages),
-            )
-            self._reset_window_state()
-            self._process_message_stream(messages)
+        if not all_messages:
+            return
 
-            # 每个窗口独立完成最后一天的 Dream 同步，避免跨窗口轨迹混杂。
-            if self._daily_trace_buffer:
-                last_date = self._last_date or self._daily_trace_buffer[-1].get("timestamp")
-                if last_date:
-                    self._trigger_dream_mode(last_date)
-                self._daily_trace_buffer.clear()
+        all_messages.sort(key=lambda msg: msg["timestamp"])
+        self._reset_window_state()
+        self._process_message_stream(all_messages)
+
+        if self._daily_trace_buffer:
+            last_date = self._last_date or self._daily_trace_buffer[-1].get("timestamp")
+            if last_date:
+                self._trigger_dream_mode(last_date)
+            self._daily_trace_buffer.clear()
 
     def _process_message_stream(self, messages: List[Dict]) -> None:
         """
@@ -294,6 +300,7 @@ class Pipeline:
                 chat_type=chat_type,
                 is_group=is_group,
                 conversation_id=msg.get("conversation_id", msg.get("source_file", "")),
+                current_time=ts,
             )
 
             simulated_record = {
@@ -342,13 +349,20 @@ class Pipeline:
             logger.info("本日无对话踪迹，跳过 Dream 模式")
             return
 
-        traces_text = self._format_daily_traces(self._daily_trace_buffer)
         current_time_str = target_date.strftime("%Y-%m-%d 23:59:59")
         target_characters = self._get_dream_target_characters(self._daily_trace_buffer)
 
         for character_name in target_characters:
-            current_profile = self.pm.get_profile(character_name)
-            current_memory = self.pm.get_memory(character_name)
+            relevant_traces = self._filter_traces_for_character(
+                self._daily_trace_buffer,
+                character_name,
+            )
+            if not relevant_traces:
+                continue
+
+            traces_text = self._format_daily_traces(relevant_traces)
+            current_profile = self.pm.get_profile_as_of(character_name, target_date)
+            current_memory = self.pm.get_memory_as_of(character_name, target_date)
 
             system_msg = SYSTEM_PROMPT_DREAM_SYNC.format(
                 current_time=current_time_str,
@@ -373,7 +387,7 @@ class Pipeline:
                 success = self.pm.dream_update(
                     character_name=character_name,
                     raw_output=raw_output,
-                    update_time=target_date,
+                    update_time=target_date.replace(hour=23, minute=59, second=59),
                 )
                 if success:
                     logger.info("角色 [%s] Dream 模式更新成功 (%s)", character_name, date_str)
@@ -530,6 +544,23 @@ class Pipeline:
         }
 
     @staticmethod
+    def _filter_conversations_before(
+        conversations: Dict[str, List[Dict]],
+        cutoff: datetime,
+    ) -> Dict[str, List[Dict]]:
+        """只保留 cutoff 日期之前的历史消息。"""
+        filtered: Dict[str, List[Dict]] = {}
+        for conversation_id, messages in conversations.items():
+            kept = [
+                msg for msg in messages
+                if isinstance(msg.get("timestamp"), datetime)
+                and msg["timestamp"] < cutoff
+            ]
+            if kept:
+                filtered[conversation_id] = kept
+        return filtered
+
+    @staticmethod
     def _format_daily_traces(traces: List[Dict[str, Any]]) -> str:
         """将本日审计踪迹格式化为文本。"""
         lines: list[str] = []
@@ -547,15 +578,68 @@ class Pipeline:
             lines.append(f"{window}[{ts_str}] [{trace_type}] {sender}: {content}")
         return "\n".join(lines)
 
-    @staticmethod
-    def _get_dream_target_characters(traces: List[Dict[str, Any]]) -> List[str]:
+    def _get_dream_target_characters(self, traces: List[Dict[str, Any]]) -> List[str]:
         """从当日会话踪迹中识别需要更新画像/记忆的角色。"""
         characters: Set[str] = set()
+        known_characters = self._get_known_characters()
         for trace in traces:
             sender = str(trace.get("sender", "")).strip()
             if sender:
                 characters.add(sender)
+
+            content = str(trace.get("content", ""))
+            if self._mentions_all(content):
+                characters.update(known_characters)
+            else:
+                for character_name in known_characters:
+                    if character_name and character_name in content:
+                        characters.add(character_name)
         return sorted(characters)
+
+    def _filter_traces_for_character(
+        self,
+        traces: List[Dict[str, Any]],
+        character_name: str,
+    ) -> List[Dict[str, Any]]:
+        """保留所有涉及指定角色的窗口中的当日会话踪迹。"""
+        relevant_windows = {
+            str(trace.get("conversation_id", ""))
+            for trace in traces
+            if self._trace_involves_character(trace, character_name)
+        }
+        if not relevant_windows:
+            return []
+        return [
+            trace for trace in traces
+            if str(trace.get("conversation_id", "")) in relevant_windows
+        ]
+
+    def _trace_involves_character(self, trace: Dict[str, Any], character_name: str) -> bool:
+        """判断单条踪迹是否涉及指定角色。"""
+        sender = str(trace.get("sender", "")).strip()
+        content = str(trace.get("content", ""))
+        return (
+            sender == character_name
+            or character_name in content
+            or self._mentions_all(content)
+        )
+
+    def _get_known_characters(self) -> Set[str]:
+        """汇总初始化阶段和 profiles 目录中已知角色。"""
+        characters = set(self._known_characters)
+        characters.add(TARGET_CHARACTER)
+        profiles_dir = settings.PROFILES_DIR
+        if profiles_dir.is_dir():
+            characters.update(
+                path.name for path in profiles_dir.iterdir()
+                if path.is_dir()
+            )
+        return {name for name in characters if name}
+
+    @staticmethod
+    def _mentions_all(content: str) -> bool:
+        """识别群聊中的 @所有人 类消息。"""
+        return any(marker in content for marker in ALL_MENTION_MARKERS)
 
 
 def main() -> None:

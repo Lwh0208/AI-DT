@@ -274,18 +274,25 @@ class ReportGenerator:
             if not char_dir.is_dir():
                 continue
             char_name = char_dir.name
-            for md_file in ("profile.md", "memory.md"):
-                md_path = char_dir / md_file
-                if not md_path.is_file():
-                    continue
-                with open(md_path, "r", encoding="utf-8") as fh:
-                    for line in fh:
-                        if line.strip().startswith("<!-- 最后更新时间："):
-                            # 提取审计信息
-                            audit_line = line.strip()
-                            # 去掉 <!--  --> 包裹
-                            inner = audit_line.lstrip("<!-- ").rstrip(" -->")
-                            audit_entries.append(f"- **{char_name}** ({md_file}): {inner}")
+            version_dirs = [
+                child for child in sorted(char_dir.iterdir())
+                if child.is_dir()
+            ]
+            for version_dir in version_dirs:
+                for md_file in ("profile.md", "memory.md"):
+                    md_path = version_dir / md_file
+                    if not md_path.is_file():
+                        continue
+                    with open(md_path, "r", encoding="utf-8") as fh:
+                        for line in fh:
+                            if line.strip().startswith("<!-- 最后更新时间："):
+                                # 提取审计信息
+                                audit_line = line.strip()
+                                # 去掉 <!--  --> 包裹
+                                inner = audit_line.lstrip("<!-- ").rstrip(" -->")
+                                audit_entries.append(
+                                    f"- **{char_name}** ({version_dir.name}/{md_file}): {inner}"
+                                )
 
         lines = [
             "## Dream 模式更新摘要",

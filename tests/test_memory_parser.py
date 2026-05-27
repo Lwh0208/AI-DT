@@ -231,3 +231,27 @@ class TestParseInitialBuildOutput:
         corrupted = "---PROFILE_START---\n画像内容\n---PROFILE_END---\n---MEMORY_START---\n记忆缺失结束标签"
         with pytest.raises(CorruptedLlmOutputError):
             parse_initial_build_output(corrupted)
+
+
+def test_profile_manager_reads_latest_version_as_of(tmp_path):
+    """画像按日期版本读取：预测 3.2 时应读取 3.1 更新后的完整版本。"""
+    import src.config as cfg
+    from src.profile_manager import ProfileManager
+
+    original_profiles_dir = cfg.settings.PROFILES_DIR
+    try:
+        cfg.settings.PROFILES_DIR = tmp_path / "profiles"
+        pm = ProfileManager()
+        char_dir = cfg.settings.PROFILES_DIR / "张照西"
+        (char_dir / "2026-03-01").mkdir(parents=True)
+        (char_dir / "2026-03-02").mkdir(parents=True)
+        (char_dir / "2026-03-01" / "profile.md").write_text("profile 0301", encoding="utf-8")
+        (char_dir / "2026-03-01" / "memory.md").write_text("memory 0301", encoding="utf-8")
+        (char_dir / "2026-03-02" / "profile.md").write_text("profile 0302", encoding="utf-8")
+        (char_dir / "2026-03-02" / "memory.md").write_text("memory 0302", encoding="utf-8")
+
+        assert pm.get_profile_as_of("张照西", datetime(2026, 3, 1, 12, 0, 0)) == "profile 0301"
+        assert pm.get_memory_as_of("张照西", datetime(2026, 3, 2, 12, 0, 0)) == "memory 0302"
+        assert pm.get_profile("张照西") == "profile 0302"
+    finally:
+        cfg.settings.PROFILES_DIR = original_profiles_dir

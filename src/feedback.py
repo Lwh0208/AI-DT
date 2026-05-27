@@ -49,6 +49,7 @@ class FeedbackEngine:
         chat_type: str,
         is_group: bool = False,
         conversation_id: Optional[str] = None,
+        current_time: Optional[datetime] = None,
     ) -> str:
         """
         生成张照西的模拟回复。
@@ -59,6 +60,7 @@ class FeedbackEngine:
             chat_type: "群聊" 或 "单聊"
             is_group: 是否是群聊（快捷标记）
             conversation_id: 当前聊天窗口 ID，用于隔离最近上下文。
+            current_time: 当前消息时间，用于读取该时间点可用的画像版本。
 
         Returns:
             模拟回复纯文本
@@ -66,12 +68,19 @@ class FeedbackEngine:
         if is_group:
             chat_type = "群聊"
 
-        # 加载张照西的画像和记忆
-        zhang_profile = self.pm.get_profile("张照西")
-        zhang_memory = self.pm.get_memory("张照西")
+        # 加载当前时间点可用的张照西画像和记忆
+        if current_time is not None:
+            zhang_profile = self.pm.get_profile_as_of("张照西", current_time)
+            zhang_memory = self.pm.get_memory_as_of("张照西", current_time)
+        else:
+            zhang_profile = self.pm.get_profile("张照西")
+            zhang_memory = self.pm.get_memory("张照西")
 
-        # 加载发送者的画像和记忆
-        sender_profile = self.pm.get_profile(current_sender)
+        # 加载当前时间点可用的发送者画像
+        if current_time is not None:
+            sender_profile = self.pm.get_profile_as_of(current_sender, current_time)
+        else:
+            sender_profile = self.pm.get_profile(current_sender)
         if not sender_profile:
             sender_profile = "（该对话者尚无画像记录）"
 
