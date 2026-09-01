@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '2d53c842-b988-4664-9368-80e73f098429'
-  PropagateID: '2d53c842-b988-4664-9368-80e73f098429'
-  ReservedCode1: 'b8e69118-8664-4ab2-a745-ecfc51f3c627'
-  ReservedCode2: 'b8e69118-8664-4ab2-a745-ecfc51f3c627'
----
-
 # smart_reply_assistant
 
 高仿真数字孪生回复助手系统 — 为固定使用者"张照西"构建的生产级本地智能回复预测引擎。
